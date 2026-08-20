@@ -1,10 +1,10 @@
-if [ -z "$S3_BUCKET" ]; then
-  echo "You need to set the S3_BUCKET environment variable."
+if [ -z "$RCLONE_REMOTE" ]; then
+  echo "You need to set the RCLONE_REMOTE environment variable."
   exit 1
 fi
 
-if [ -z "$POSTGRES_DATABASE" ]; then
-  echo "You need to set the POSTGRES_DATABASE environment variable."
+if [ -z "$POSTGRES_DATABASES" ]; then
+  echo "You need to set the POSTGRES_DATABASES environment variable."
   exit 1
 fi
 
@@ -23,18 +23,9 @@ if [ -z "$POSTGRES_PASSWORD" ]; then
   exit 1
 fi
 
-if [ -z "$S3_ENDPOINT" ]; then
-  aws_args=""
-else
-  aws_args="--endpoint-url $S3_ENDPOINT"
-fi
+# rclone is configured entirely through RCLONE_CONFIG_<NAME>_* variables the
+# user supplies; it needs no config file. Normalize away a trailing slash so
+# "${RCLONE_REMOTE}/${database}" is always well formed.
+RCLONE_REMOTE="${RCLONE_REMOTE%/}"
 
-
-if [ -n "$S3_ACCESS_KEY_ID" ]; then
-  export AWS_ACCESS_KEY_ID=$S3_ACCESS_KEY_ID
-fi
-if [ -n "$S3_SECRET_ACCESS_KEY" ]; then
-  export AWS_SECRET_ACCESS_KEY=$S3_SECRET_ACCESS_KEY
-fi
-export AWS_DEFAULT_REGION=$S3_REGION
 export PGPASSWORD=$POSTGRES_PASSWORD

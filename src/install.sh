@@ -10,7 +10,9 @@ apk add postgresql${POSTGRES_VERSION}-client
 
 apk add gnupg
 
-apk add aws-cli
+# rclone talks to any rclone backend (S3, R2, B2, SFTP, ...) and is configured
+# purely through RCLONE_* environment variables — no config file on disk.
+apk add rclone
 
 # curl stays installed: used for the optional HEARTBEAT_URL ping in backup.sh
 apk add curl

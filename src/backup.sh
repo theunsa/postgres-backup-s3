@@ -5,50 +5,72 @@ set -o pipefail
 
 source ./env.sh
 
-echo "Creating backup of $POSTGRES_DATABASE database..."
-pg_dump --format=custom \
-        -h $POSTGRES_HOST \
-        -p $POSTGRES_PORT \
-        -U $POSTGRES_USER \
-        -d $POSTGRES_DATABASE \
-        $PGDUMP_EXTRA_OPTS \
-        > db.dump
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
 
 timestamp=$(date +"%Y-%m-%dT%H:%M:%S")
-s3_uri_base="s3://${S3_BUCKET}/${S3_PREFIX}/${POSTGRES_DATABASE}_${timestamp}.dump"
+failed=''
 
-if [ -n "$PASSPHRASE" ]; then
-  echo "Encrypting backup..."
-  rm -f db.dump.gpg
-  gpg --symmetric --batch --passphrase "$PASSPHRASE" db.dump
-  rm db.dump
-  local_file="db.dump.gpg"
-  s3_uri="${s3_uri_base}.gpg"
-else
-  local_file="db.dump"
-  s3_uri="$s3_uri_base"
+for database in $POSTGRES_DATABASES; do
+  dump_file="${work_dir}/${database}_${timestamp}.dump"
+
+  echo "Creating backup of $database database..."
+  if ! pg_dump --format=custom \
+               -h "$POSTGRES_HOST" \
+               -p "$POSTGRES_PORT" \
+               -U "$POSTGRES_USER" \
+               -d "$database" \
+               $PGDUMP_EXTRA_OPTS \
+               --file "$dump_file"; then
+    echo "ERROR: pg_dump failed for database '$database'."
+    failed="${failed}${database} "
+    rm -f "$dump_file"
+    continue
+  fi
+
+  if [ -n "$PASSPHRASE" ]; then
+    echo "Encrypting backup of $database..."
+    if ! gpg --symmetric --batch --yes --passphrase "$PASSPHRASE" "$dump_file"; then
+      echo "ERROR: gpg encryption failed for database '$database'."
+      failed="${failed}${database} "
+      rm -f "$dump_file" "${dump_file}.gpg"
+      continue
+    fi
+    rm -f "$dump_file"
+    local_file="${dump_file}.gpg"
+  else
+    local_file="$dump_file"
+  fi
+
+  remote_path="${RCLONE_REMOTE}/${database}/$(basename "$local_file")"
+
+  echo "Uploading backup of $database to ${remote_path}..."
+  if ! rclone copyto "$local_file" "$remote_path"; then
+    echo "ERROR: upload failed for database '$database'."
+    failed="${failed}${database} "
+    rm -f "$local_file"
+    continue
+  fi
+  rm -f "$local_file"
+
+  if [ -n "$BACKUP_KEEP_DAYS" ]; then
+    echo "Removing backups of $database older than ${BACKUP_KEEP_DAYS} days..."
+    if ! rclone delete --min-age "${BACKUP_KEEP_DAYS}d" "${RCLONE_REMOTE}/${database}"; then
+      echo "ERROR: retention pruning failed for database '$database'."
+      failed="${failed}${database} "
+      continue
+    fi
+  fi
+
+  echo "Backup of $database complete."
+done
+
+if [ -n "$failed" ]; then
+  echo "Backup FAILED for: ${failed% }"
+  exit 1
 fi
 
-echo "Uploading backup to $S3_BUCKET..."
-aws $aws_args s3 cp "$local_file" "$s3_uri"
-rm "$local_file"
-
-echo "Backup complete."
-
-if [ -n "$BACKUP_KEEP_DAYS" ]; then
-  sec=$((86400*BACKUP_KEEP_DAYS))
-  date_from_remove=$(date -d "@$(($(date +%s) - sec))" +%Y-%m-%d)
-  backups_query="Contents[?LastModified<='${date_from_remove} 00:00:00'].{Key: Key}"
-
-  echo "Removing old backups from $S3_BUCKET..."
-  aws $aws_args s3api list-objects \
-    --bucket "${S3_BUCKET}" \
-    --prefix "${S3_PREFIX}" \
-    --query "${backups_query}" \
-    --output text \
-    | xargs -n1 -t -I 'KEY' aws $aws_args s3 rm s3://"${S3_BUCKET}"/'KEY'
-  echo "Removal complete."
-fi
+echo "All backups complete."
 
 if [ -n "$HEARTBEAT_URL" ]; then
   echo "Pinging heartbeat URL..."
